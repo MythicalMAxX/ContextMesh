@@ -24,7 +24,6 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.check.json",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
     "start": "node dist/src/cli.js run"
