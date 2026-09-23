@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.agent-network/
+.wrangler/
+.dev.vars
+*.db
+*.db-wal
+*.db-shm

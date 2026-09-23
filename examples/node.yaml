@@ -1,0 +1,28 @@
+# Per-developer node configuration (~/.agent-network/node.yaml). Created by "agent-network join"; edit to taste.
+hub: https://agent-network-hub.<your-account>.workers.dev
+org: acme
+developer: developer-b
+identity: identity.json
+database: graph.db
+
+# Local checkouts this node indexes (OpenAPI + CODEOWNERS) and publishes to the org.
+repositories:
+  dashboard: { path: D:/code/dashboard }
+
+# Optional task sources indexed by this node.
+tasks:
+  - { type: file, path: tasks.yaml }
+
+# owner_authoritative: memory about a component from its owning team applies automatically; anything else waits
+# for your approval. "manual" makes every update wait; "all" applies everything from verified members.
+policy: { apply_updates: owner_authoritative }
+
+# Answer URGENT enquiries about your components while you are away (read-only headless agent).
+responder:
+  enabled: false
+  command: ["claude", "-p", "--allowedTools", "Read,Grep,Glob"]
+  timeout_seconds: 120
+  max_per_hour: 20
+
+dashboard: { host: 127.0.0.1, port: 7421 }
+index: { interval_minutes: 15 }

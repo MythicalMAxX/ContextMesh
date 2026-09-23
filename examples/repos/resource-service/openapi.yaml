@@ -1,0 +1,111 @@
+openapi: 3.0.3
+info:
+  title: Resource Service
+  version: 2.4.0
+security:
+  - bearerAuth: []
+paths:
+  /api/resources:
+    get:
+      operationId: listResources
+      summary: List resources
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque pagination cursor from the previous page.
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 200 }
+      responses:
+        '200':
+          description: A page of resources
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ResourceDetails' }
+                  next_cursor:
+                    type: string
+                    nullable: true
+    post:
+      operationId: createResource
+      summary: Create a resource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, cloud_account_id]
+              properties:
+                name: { type: string }
+                cloud_account_id: { type: string }
+                region: { type: string, nullable: true }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourceDetails' }
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, enum: [INVALID_CLOUD_ACCOUNT, VALIDATION_FAILED] }
+  /api/resources/{resource_id}:
+    get:
+      operationId: getResource
+      summary: Get resource details
+      parameters:
+        - name: resource_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Resource details
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourceDetails' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              example: { error: PERMISSION_DENIED }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { error: RESOURCE_NOT_FOUND }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  schemas:
+    ResourceDetails:
+      type: object
+      required: [id, name, cloud_account_id, status]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        cloud_account_id: { type: string }
+        region:
+          type: string
+          nullable: true
+          description: Null for global resources.
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, DELETED]
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }

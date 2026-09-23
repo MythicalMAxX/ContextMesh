@@ -1,0 +1,17 @@
+openapi: 3.0.3
+info:
+  title: Payroll Service
+  version: 1.0.0
+paths:
+  /api/payroll/runs:
+    get:
+      summary: List payroll runs
+      responses:
+        '200':
+          description: Payroll runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs: { type: array, items: { type: object, properties: { id: { type: string }, total: { type: number } } } }

@@ -1,0 +1,4 @@
+# Backend owns the whole service; the API spec also needs an API reviewer.
+*                 @acme/backend
+/openapi.yaml     @vinamra
+/internal/        @vinamra

@@ -1,0 +1,32 @@
+# Task-board items as they typically look: short, partly outdated, and written for humans.
+- key: BE-120
+  title: Implement Resource Details API
+  component: resource-service
+  status: Done
+  description: Implement Resource Details API.
+
+- key: UI-492
+  title: Resource details page
+  component: dashboard-ui
+  status: In Progress
+  assignee: developer-b
+  description: |
+    Build the resource details page using GET /api/resources/{id}.
+    `region` can be null for global resources.
+    `status` is one of: active, inactive.
+
+- key: UI-501
+  title: Create resource form
+  component: dashboard-ui
+  status: To Do
+  assignee: developer-b
+  description: |
+    Form that submits POST /api/resources.
+    `cloud_account_id` is optional; users can attach an account later.
+
+- key: UI-510
+  title: Recommendations panel
+  component: dashboard-ui
+  status: To Do
+  description: |
+    Show right-sizing suggestions from the recommendation-engine next to each resource.

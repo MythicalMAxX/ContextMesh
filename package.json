@@ -1,0 +1,41 @@
+{
+  "name": "agent-network",
+  "version": "0.2.0",
+  "description": "ContextMesh client: shared engineering memory and end-to-end encrypted messaging between coding agents (local node + MCP server).",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MythicalMAxX/ContextMesh.git"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "agent-network": "dist/src/cli.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "shared",
+    "examples",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
+    "start": "node dist/src/cli.js run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "@types/node": "^24.13.6"
+  }
+}

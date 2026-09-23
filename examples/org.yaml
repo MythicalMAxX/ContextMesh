@@ -1,0 +1,45 @@
+# Org manifest: the ownership model shared (signed + end-to-end encrypted) with every member.
+# Only the org root can publish it:  agent-network org manifest examples/org.yaml
+organization: acme
+
+teams:
+  backend: { name: Backend, github_team: "@acme/backend" }
+  frontend: { name: Frontend }
+  mobile: { name: Mobile }
+  ai: { name: AI Platform }
+  payroll: { name: Payroll }
+
+developers:
+  vinamra: { name: Vinamra, email: vinamra@acme.dev, github: vinamra, teams: [backend], admin: true }
+  developer-b: { name: Developer B, email: b@acme.dev, teams: [frontend] }
+  developer-c: { name: Developer C, email: c@acme.dev, teams: [ai] }
+  developer-d: { name: Developer D, email: d@acme.dev, teams: [payroll] }
+  developer-e: { name: Developer E, email: e@acme.dev, teams: [mobile] }
+
+components:
+  resource-service:
+    team: backend
+    description: Resource inventory API (resources, cloud accounts, regions)
+    aliases: [resources-api]
+    repository: resource-service
+  dashboard-ui:
+    team: frontend
+    owners: [developer-b]
+    description: Customer dashboard web app
+    repository: dashboard
+  mobile-app:
+    team: mobile
+    owners: [developer-e]
+    description: iOS and Android client
+    consumes: [resource-service]
+  recommendation-engine:
+    team: ai
+    owners: [developer-c]
+    description: ML service recommending resource right-sizing
+    repository: recommendation-engine
+  payroll-service:
+    team: payroll
+    owners: [developer-d]
+    description: Payroll runs and compensation
+    repository: payroll-service
+    visibility: restricted   # encrypted only for the payroll team (and org admins)

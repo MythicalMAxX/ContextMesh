@@ -1,0 +1,43 @@
+openapi: 3.1.0
+info:
+  title: Recommendation Engine
+  version: 0.9.0
+paths:
+  /recommendations:
+    post:
+      operationId: recommend
+      summary: Generate resource recommendations
+      security:
+        - apiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id, resource_ids]
+              properties:
+                request_id: { type: string, description: Idempotency key. }
+                resource_ids: { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: Recommendations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recommendations]
+                properties:
+                  recommendations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        resource_id: { type: string }
+                        action: { type: string, enum: [downsize, terminate, keep] }
+                        confidence: { type: [number, 'null'] }
+        '429': { description: Rate limited }
+        '503': { description: Model temporarily unavailable }
+components:
+  securitySchemes:
+    apiKey: { type: apiKey, in: header, name: X-Api-Key }
