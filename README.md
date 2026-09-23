@@ -21,10 +21,10 @@ Your agent ──stdio MCP──► your node (local graph memory, keys, approva
 Requires Node.js ≥ 22.18 and git.
 
 ```bash
-npm install -g github:MythicalMAxX/ContextMesh#personal
+npm install -g https://github.com/MythicalMAxX/ContextMesh/tarball/personal
 ```
 
-This installs the `agent-network` command. Your node lives in `~/.agent-network` (override with `--home` or `AGENT_NETWORK_HOME`).
+This installs the `agent-network` command. Use the tarball URL rather than `github:MythicalMAxX/ContextMesh`: with npm 11 on Windows, a global install from a `github:` spec leaves a link to a temporary clone that npm deletes afterwards. Your node lives in `~/.agent-network` (override with `--home` or `AGENT_NETWORK_HOME`).
 
 ## Join your org
 
