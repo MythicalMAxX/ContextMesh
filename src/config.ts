@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
@@ -47,6 +47,12 @@ export const ManifestSchema = z.object({
   teams: z.record(id, TeamSchema).default({}),
   developers: z.record(id, DeveloperSchema).default({}),
   components: z.record(id, ComponentSchema).default({}),
+  /**
+   * Experiment orgs only: admin members who receive a sealed copy of every message and write it to a trace. This is a
+   * deliberate break of "the relay and other members cannot read your messages", so it is visible: observers appear in every
+   * message's audience and in the agents' instructions.
+   */
+  observers: z.array(id).default([]),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;
@@ -78,6 +84,10 @@ export function validateManifest(raw: unknown): Manifest {
       else if (other && other !== compId) problems.push(`components.${compId}: alias "${alias}" also used by ${other}`);
       aliases.set(key, compId);
     }
+  }
+  for (const observer of manifest.observers) {
+    if (!developers.has(observer)) problems.push(`observers: unknown developer "${observer}"`);
+    else if (!manifest.developers[observer]!.admin) problems.push(`observers: "${observer}" must be an admin`);
   }
   if (problems.length) throw new Error(`Invalid manifest:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
   return manifest;
@@ -121,6 +131,65 @@ const TaskSourceSchema = z.discriminatedUnion('type', [
   }),
 ]);
 
+/**
+ * A project is the unit of scope: the folders an agent may look at, and a short description so it does not have to
+ * explore to find out what the project is. Paths are machine-specific, so projects live in the node config.
+ */
+const ProjectSchema = z.object({
+  /** What the project is and does, in plain words. Shown to agents so they do not need to explore. */
+  description: z.string().default(''),
+  /** One or more folders (absolute, or relative to the node directory). */
+  paths: z.array(z.string().min(1)).min(1),
+  /** Logical repository id from the org manifest; makes this project the local checkout for that repository. */
+  repository: id.optional(),
+  /** Anything an agent should know up front: how to build and test, entry points, conventions. */
+  notes: z.string().optional(),
+});
+
+/** A named group of projects an agent works across, e.g. a product made of several repositories. */
+const WorkspaceSchema = z.object({
+  description: z.string().default(''),
+  projects: z.array(id).min(1),
+});
+
+export const RUNTIME_TOOLS = ['claude-code', 'codex', 'antigravity', 'gemini', 'opencode', 'custom', 'api'] as const;
+export type RuntimeTool = (typeof RUNTIME_TOOLS)[number];
+
+/**
+ * How the node runs an agent by itself (answering urgent questions, keeping memory up to date). This never affects
+ * your own interactive agent. The model is always an explicit choice: there is no silent default.
+ */
+const AgentProfileSchema = z
+  .object({
+    tool: z.enum(RUNTIME_TOOLS),
+    /** Model name or alias for the tool. "default" deliberately uses whatever the tool is configured with. */
+    model: z.string().min(1).optional(),
+    /** tool "custom": the full command. "{model}" is replaced by the model. */
+    command: z.array(z.string()).optional(),
+    /** Extra arguments appended to a preset's command. */
+    args: z.array(z.string()).default([]),
+    /** tool "api": an OpenAI-compatible endpoint (also private or self-hosted models) or the Anthropic API. */
+    provider: z.enum(['openai-compatible', 'anthropic']).optional(),
+    base_url: z.string().url().optional(),
+    /** Name of the environment variable holding the API key. Keys never live in this file. */
+    api_key_env: z.string().optional(),
+    max_tokens: z.number().int().positive().default(1024),
+    timeout_seconds: z.number().int().positive().default(120),
+  })
+  .superRefine((profile, ctx) => {
+    if (profile.tool === 'custom') {
+      if (!profile.command?.length) ctx.addIssue({ code: 'custom', path: ['command'], message: 'a "custom" tool needs the full command' });
+      return;
+    }
+    if (!profile.model) ctx.addIssue({ code: 'custom', path: ['model'], message: 'choose a model (use "default" to deliberately use the tool\'s own default)' });
+    if (profile.tool === 'api') {
+      if (!profile.provider) ctx.addIssue({ code: 'custom', path: ['provider'], message: 'an "api" tool needs a provider (openai-compatible or anthropic)' });
+      if (profile.provider === 'openai-compatible' && !profile.base_url) ctx.addIssue({ code: 'custom', path: ['base_url'], message: 'an openai-compatible endpoint needs base_url' });
+    }
+  });
+
+export type AgentProfile = z.infer<typeof AgentProfileSchema>;
+
 export const NodeConfigSchema = z.object({
   /** Hub base URL, e.g. https://agent-network-hub.<account>.workers.dev */
   hub: z.string().url(),
@@ -128,9 +197,21 @@ export const NodeConfigSchema = z.object({
   developer: id,
   identity: z.string().default('identity.json'),
   database: z.string().default('graph.db'),
+  /**
+   * Observer node (experiments): messages are written to the trace instead of the inbox, and nothing is acted on.
+   * Only meaningful for a member the manifest lists under `observers`.
+   */
+  observer: z.boolean().default(false),
   repo_cache: z.string().default('repos'),
   /** Local checkouts this developer's node indexes and publishes (usually the components they own). */
   repositories: z.record(id, RepositorySchema).default({}),
+  /** What agents may look at. When any project is defined, nothing outside the projects is indexed or served. */
+  projects: z.record(id, ProjectSchema).default({}),
+  workspaces: z.record(id, WorkspaceSchema).default({}),
+  /** The workspace agents are oriented to. Without it, every project is in scope. */
+  workspace: id.optional(),
+  /** Named ways to run an agent from the node: pick the tool and model per job. */
+  agents: z.object({ profiles: z.record(id, AgentProfileSchema).default({}) }).prefault({}),
   tasks: z.array(TaskSourceSchema).default([]),
   policy: z
     .object({
@@ -147,10 +228,13 @@ export const NodeConfigSchema = z.object({
     .object({
       /** Answer urgent enquiries while the developer is away by running a read-only headless agent. */
       enabled: z.boolean().default(false),
-      /** Command and arguments; the enquiry prompt is written to stdin and the answer read from stdout. */
+      /** Which entry of agents.profiles runs it. Preferred: the command is built, scoped and read-only. */
+      profile: id.optional(),
+      /** Raw command and arguments (advanced; used when no profile is set). The prompt is written to stdin. */
       command: z.array(z.string()).default([]),
       timeout_seconds: z.number().int().positive().default(120),
       max_per_hour: z.number().int().positive().default(20),
+      max_per_day: z.number().int().positive().default(100),
     })
     .prefault({}),
   dashboard: z
@@ -162,6 +246,11 @@ export const NodeConfigSchema = z.object({
   index: z.object({ interval_minutes: z.number().min(0).default(15) }).prefault({}),
   sync: z.object({ poll_seconds: z.number().positive().default(30) }).prefault({}),
   freshness: z.object({ max_age_days: z.number().positive().default(30) }).prefault({}),
+  /**
+   * How long `ask` waits for an answer when the agent does not say. An agent that is not given the answer tends to carry on with a
+   * guess and finish before it arrives (docs/results/E1-pilot.md, F-04 and F-09), so the default is to wait.
+   */
+  ask: z.object({ default_wait_seconds: z.number().min(0).max(120).default(30) }).prefault({}),
 });
 
 export type NodeConfig = z.infer<typeof NodeConfigSchema> & { baseDir: string };
@@ -173,7 +262,45 @@ export function parseNodeConfig(raw: unknown, baseDir: string): NodeConfig {
     const issues = parsed.error.issues.map((issue) => `  - ${issue.path.join('.') || '(root)'}: ${issue.message}`);
     throw new Error(`Invalid node configuration:\n${issues.join('\n')}`);
   }
-  return { ...parsed.data, baseDir };
+  const settings: NodeConfig = { ...parsed.data, baseDir };
+  const problems = crossCheckNodeConfig(settings);
+  if (problems.length) throw new Error(`Invalid node configuration:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
+  return settings;
+}
+
+/** Everything the schema cannot express on its own: references between sections and the project boundary. */
+function crossCheckNodeConfig(settings: NodeConfig): string[] {
+  const problems: string[] = [];
+  for (const [name, workspace] of Object.entries(settings.workspaces)) {
+    for (const project of workspace.projects) if (!settings.projects[project]) problems.push(`workspaces.${name}: unknown project "${project}"`);
+  }
+  if (settings.workspace && !settings.workspaces[settings.workspace]) problems.push(`workspace: unknown workspace "${settings.workspace}"`);
+  if (settings.responder.profile && !settings.agents.profiles[settings.responder.profile]) {
+    problems.push(`responder.profile: unknown profile "${settings.responder.profile}" (define it under agents.profiles)`);
+  }
+  const roots = projectRoots(settings);
+  if (roots) {
+    for (const [name, repo] of Object.entries(settings.repositories)) {
+      if (repo.path && !roots.some((root) => pathInside(root, resolveFrom(settings, repo.path!)))) {
+        problems.push(`repositories.${name}: ${repo.path} is outside every project. Add it as a project (agent-network project add) so agents may look there.`);
+      }
+    }
+  }
+  return problems;
+}
+
+/** True when `candidate` is `root` or lies below it. Case-insensitive on Windows. */
+export function pathInside(root: string, candidate: string): boolean {
+  const norm = (p: string) => (process.platform === 'win32' ? resolve(p).toLowerCase() : resolve(p));
+  const rel = relative(norm(root), norm(candidate));
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/** Absolute folders agents may use, or null when no project is defined (nothing is scoped yet). */
+export function projectRoots(settings: Pick<NodeConfig, 'projects' | 'baseDir'>): string[] | null {
+  const projects = Object.values(settings.projects);
+  if (projects.length === 0) return null;
+  return projects.flatMap((project) => project.paths.map((p) => resolveFrom(settings, p)));
 }
 
 export function loadNodeConfig(path: string): NodeConfig {
@@ -202,20 +329,31 @@ export interface Config {
   repo_cache: string;
   freshness: { max_age_days: number };
   routing: { online_window_minutes: number };
+  /** Folders the node may read (projects). null = no project defined yet, so nothing is restricted. */
+  scope_roots: string[] | null;
 }
 
-export function composeConfig(manifest: Manifest | null, node: Pick<NodeConfig, 'baseDir' | 'org' | 'repositories' | 'tasks' | 'repo_cache' | 'freshness'>): Config {
+export function composeConfig(
+  manifest: Manifest | null,
+  node: Pick<NodeConfig, 'baseDir' | 'org' | 'repositories' | 'tasks' | 'repo_cache' | 'freshness'> & Partial<Pick<NodeConfig, 'projects'>>,
+): Config {
+  // A project that names a repository is that repository's local checkout.
+  const repositories = { ...node.repositories };
+  for (const project of Object.values(node.projects ?? {})) {
+    if (project.repository && !repositories[project.repository]) repositories[project.repository] = { path: project.paths[0] };
+  }
   return {
     baseDir: node.baseDir,
     organization: manifest?.organization ?? node.org,
     teams: manifest?.teams ?? {},
     developers: manifest?.developers ?? {},
     components: manifest?.components ?? {},
-    repositories: node.repositories,
+    repositories,
     tasks: node.tasks,
     repo_cache: node.repo_cache,
     freshness: node.freshness,
     routing: { online_window_minutes: 10 },
+    scope_roots: projectRoots({ baseDir: node.baseDir, projects: node.projects ?? {} }),
   };
 }
 

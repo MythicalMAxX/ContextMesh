@@ -20,7 +20,8 @@
     "src",
     "shared",
     "examples",
-    "README.md"
+    "README.md",
+    "SETUP.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

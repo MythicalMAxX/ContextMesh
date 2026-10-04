@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { stringify as toYaml } from 'yaml';
 import { fingerprint, fromB64u, fromUtf8, randomBytes, randomId, signJson, signingKeysFromSeed, toB64u, utf8 } from '../../shared/crypto.js';
 import { validateManifest } from '../config.js';
+import { reserveOrg } from './account.js';
 import { activeMembers } from './directory.js';
 import { HubClient } from './hub-client.js';
 import { generateKeys, rootFromKeys, saveIdentity } from './identity.js';
@@ -14,7 +15,22 @@ import { LocalNode, chunkUpdate } from './node.js';
 function writeNodeConfig(home, settings) {
     mkdirSync(home, { recursive: true });
     const text = `${toYaml({ hub: settings.hub, org: settings.org, developer: settings.developer, identity: 'identity.json', database: 'graph.db' })}
-# Local checkouts this node indexes and publishes (usually the components you own):
+# Start here: run "agent-network setup". It asks which folder(s) are your project and which AI tool and model to use
+# for background work, and writes the sections below for you.
+#
+# What agents may look at (nothing outside these folders is indexed or served, and agents are told this map):
+# projects:
+#   resource-service:
+#     description: Resource API (Go). Run make test.
+#     paths: [D:/code/resource-service]
+#     repository: resource-service
+#
+# How this node runs an agent by itself. You choose the tool and the model; there is no silent default:
+# agents:
+#   profiles:
+#     background: { tool: claude-code, model: haiku }
+#
+# Local checkouts this node indexes and publishes (a project with "repository:" already provides one):
 # repositories:
 #   resource-service: { path: D:/code/resource-service }
 #
@@ -28,13 +44,15 @@ function writeNodeConfig(home, settings) {
 # Answer URGENT enquiries while you are away with a read-only headless agent (off by default):
 # responder:
 #   enabled: true
-#   command: ["claude", "-p", "--allowedTools", "Read,Grep,Glob"]
+#   profile: background
 #   timeout_seconds: 120
 `;
     writeFileSync(join(home, 'node.yaml'), text);
 }
 /** Creates the org on the hub with this developer as root, and publishes the first manifest. */
 export async function initOrg(options) {
+    if (!options.bootstrapToken && !options.account)
+        throw new Error('Creating an org needs either a signed-in account (agent-network login) or the hub\'s BOOTSTRAP_TOKEN.');
     const manifest = validateManifest(options.manifest);
     if (!manifest.developers[options.developer])
         throw new Error(`The manifest must list the org root "${options.developer}" under developers.`);
@@ -60,7 +78,8 @@ export async function initOrg(options) {
         issuer: options.developer,
     };
     const hub = new HubClient(options.hub, options.org, null, options.fetch);
-    await hub.init(cert, await signJson(keys.sign.private, cert), options.bootstrapToken);
+    const auth = options.bootstrapToken ?? { ticket: (await reserveOrg(options.hub, options.account, options.org, keys.sign.public, options.fetch)).ticket };
+    await hub.init(cert, await signJson(keys.sign.private, cert), auth);
     await saveIdentity(join(home, 'identity.json'), keys);
     writeNodeConfig(home, { hub: options.hub, org: options.org, developer: options.developer });
     const node = await LocalNode.open({ home, fetch: options.fetch, log: options.log });

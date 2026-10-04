@@ -11,6 +11,7 @@ import type { ContractChange } from '../contracts.ts';
 import { applyCodeowners, parseCodeowners, storeCodeowners, type ComponentRow, type RepositoryRow } from '../registry.ts';
 import { endpointKey } from '../subjects.ts';
 import { SYSTEM_IDENTITY, type Contract, type Ctx } from '../types.ts';
+import { insideRoots } from '../scope.ts';
 import { fromJson, iso, unique } from '../util.ts';
 
 const exec = promisify(execFile);
@@ -27,6 +28,9 @@ async function checkout(ctx: Ctx, repo: RepositoryRow): Promise<{ dir: string; c
   if (settings.path) {
     const dir = resolveFrom(ctx.config, settings.path);
     if (!existsSync(dir)) throw new Error(`path not found: ${dir}`);
+    if (ctx.config.scope_roots && !insideRoots(ctx.config.scope_roots, dir)) {
+      throw new Error(`${dir} is outside every project, so it was not read. Add it with "agent-network project add".`);
+    }
     const commit = await git(dir, ['rev-parse', 'HEAD']).catch(() => null);
     return { dir, commit };
   }
@@ -87,7 +91,7 @@ export async function indexRepository(ctx: Ctx, repo: RepositoryRow): Promise<Re
   ctx.db.tx(() => {
     const codeownersFile = ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS', '.gitlab/CODEOWNERS']
       .map((p) => join(dir, p))
-      .find(existsSync);
+      .find((file) => existsSync(file) && insideRoots([dir], file));
     const rules = codeownersFile ? parseCodeowners(readFileSync(codeownersFile, 'utf8')) : [];
     storeCodeowners(ctx, repo.id, rules);
     applyCodeowners(ctx, repo.id);
@@ -101,7 +105,7 @@ export async function indexRepository(ctx: Ctx, repo: RepositoryRow): Promise<Re
         .filter((c) => c.id !== component.id && c.path && (!component.path || c.path.startsWith(`${component.path}/`)))
         .map((c) => join(dir, c.path!));
       const configured = ctx.config.components[component.id]?.openapi;
-      const specFiles = configured ? configured.map((f) => join(base, f)) : discoverSpecs(base, nested);
+      const specFiles = (configured ? configured.map((f) => join(base, f)) : discoverSpecs(base, nested)).filter((file) => insideRoots([dir], file));
       const summary = { component: component.id, spec_files: specFiles.map((f) => posix(relative(dir, f))), endpoints: 0, changed: 0, removed: 0, warnings: [] as string[] };
       const seenSlots = new Set<string>();
       let allParsed = true;

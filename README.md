@@ -16,6 +16,11 @@ Your agent ──stdio MCP──► your node (local graph memory, keys, approva
   - `low`: change notices, implementation docs and memory updates, which wait for a developer's approval; the sender gets receipts.
 - **End-to-end encryption.** The hub only relays ciphertext. It cannot read, forge or alter messages, and it cannot add members.
 
+**New here? Follow the step-by-step [setup guide](SETUP.md)** (install, join or create an org, run your node, connect your agent).
+
+- **Agents stay inside your project.** Tell the node your project folder(s) and what the project is (`agent-network setup`). Agents are given that map up front, so they do not roam your computer burning usage, and the node itself never reads outside it.
+- **You choose the model.** Background work (like auto-answering urgent questions) runs on the tool and model you pick, such as Claude Code with haiku, Codex, another CLI, or a private API endpoint. Nothing defaults to the most expensive model.
+
 ## Install
 
 Requires Node.js ≥ 22.18 and git.

@@ -19,6 +19,7 @@ import { activeMembers, getMember, refreshDirectory } from './directory.js';
 import { EnvelopeError, openEnvelope, sealEnvelope } from './envelope.js';
 import { HubClient, HubError } from './hub-client.js';
 import { loadIdentity } from './identity.js';
+import { recordTrace } from './trace.js';
 import { AnswerSchema, ChangeNoticeSchema, ConflictReportSchema, EnquirySchema, GraphUpdateSchema, ManifestPayloadSchema, ReceiptSchema, SnapshotSchema, } from './payloads.js';
 export const emptyUpdate = () => ({ entries: [], retired: [], reconfirmed: [], tasks: [], repositories: [], settlements: [] });
 function sharedEntry(entry, ctx) {
@@ -165,6 +166,16 @@ export class LocalNode {
     readers(componentId) {
         return activeMembers(this.ctx).filter((m) => canRead(this.ctx, this.memberIdentity(m.id), componentId));
     }
+    /** Admin members the manifest names as observers (experiment orgs), other than this node's own developer. */
+    observers() {
+        return this.manifest()?.manifest.observers ?? [];
+    }
+    observerMembers() {
+        return this.observers()
+            .filter((id) => id !== this.developer)
+            .map((id) => this.activeMember(id))
+            .filter((m) => !!m);
+    }
     /** Who should receive a question about a component: its owners, or the whole owning team when urgent. */
     responders(componentId, priority) {
         const component = getComponent(this.ctx, componentId);
@@ -175,9 +186,11 @@ export class LocalNode {
     // Sending
     // -------------------------------------------------------------------------
     async send(message) {
-        const recipients = message.to.filter((m) => m.id !== this.developer);
-        if (recipients.length === 0)
+        const intended = message.to.filter((m) => m.id !== this.developer);
+        if (intended.length === 0)
             throw new Error('No active recipients for this message.');
+        // Observers (experiment orgs) get a sealed copy too; they appear in the audience, so nobody is observed in secret.
+        const recipients = [...new Map([...intended, ...this.observerMembers()].map((m) => [m.id, m])).values()];
         const envelope = await sealEnvelope(this.keys, recipients, {
             kind: message.kind,
             priority: message.priority,
@@ -302,7 +315,10 @@ export class LocalNode {
             return this.ctx.db.tx(() => {
                 if (this.processed(header.id))
                     return null;
-                const extra = this.handle(opened.header, opened.payload, opened.sender);
+                // An observer node records everything and acts on nothing, except the manifest that keeps it current.
+                if (this.settings.observer)
+                    recordTrace(this.ctx, opened.header, opened.payload);
+                const extra = this.settings.observer && opened.header.kind !== 'manifest' ? {} : this.handle(opened.header, opened.payload, opened.sender);
                 this.ctx.db.run("INSERT INTO processed_messages (id, seq, kind, sender, status, at) VALUES (:id, NULL, :kind, :sender, 'ok', :now)", { id: header.id, kind: header.kind, sender: header.sender, now: iso(this.ctx.now()) });
                 return { id: header.id, kind: header.kind, priority: header.priority, sender: header.sender, status: 'ok', ...extra };
             });

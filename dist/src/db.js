@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS outbox (
   online TEXT, error TEXT, replies TEXT NOT NULL DEFAULT '[]', expires_at TEXT
 );
 CREATE INDEX IF NOT EXISTS outbox_state ON outbox (state);
+
+-- Observer node (experiments): plaintext copy of every message addressed to it
+CREATE TABLE IF NOT EXISTS trace (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, observed_at TEXT NOT NULL,
+  sender TEXT NOT NULL, audience TEXT NOT NULL, kind TEXT NOT NULL, priority TEXT NOT NULL, reply_to TEXT,
+  component_id TEXT, payload TEXT NOT NULL
+);
 `;
 function bind(params) {
     const out = {};

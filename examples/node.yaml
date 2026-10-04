@@ -5,9 +5,18 @@ developer: developer-b
 identity: identity.json
 database: graph.db
 
-# Local checkouts this node indexes (OpenAPI + CODEOWNERS) and publishes to the org.
-repositories:
-  dashboard: { path: D:/code/dashboard }
+# What agents may look at. Created by "agent-network setup". Once any project exists, nothing outside the projects is
+# indexed or served, and agents are told these folders and descriptions instead of searching your computer.
+projects:
+  dashboard:
+    description: Customer dashboard (React). Run npm test.
+    paths: [D:/code/dashboard]
+    repository: dashboard   # makes this folder the local checkout of that manifest repository
+
+# How this node runs an agent by itself. You choose the tool AND the model; there is no silent default.
+agents:
+  profiles:
+    background: { tool: claude-code, model: haiku }
 
 # Optional task sources indexed by this node.
 tasks:
@@ -20,9 +29,10 @@ policy: { apply_updates: owner_authoritative }
 # Answer URGENT enquiries about your components while you are away (read-only headless agent).
 responder:
   enabled: false
-  command: ["claude", "-p", "--allowedTools", "Read,Grep,Glob"]
+  profile: background   # read-only, limited to the project folders, with the model chosen above
   timeout_seconds: 120
   max_per_hour: 20
+  max_per_day: 100
 
 dashboard: { host: 127.0.0.1, port: 7421 }
 index: { interval_minutes: 15 }

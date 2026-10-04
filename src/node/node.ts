@@ -20,6 +20,7 @@ import { activeMembers, getMember, refreshDirectory, type Member } from './direc
 import { EnvelopeError, openEnvelope, sealEnvelope } from './envelope.ts';
 import { HubClient, HubError } from './hub-client.ts';
 import { loadIdentity, type Keys } from './identity.ts';
+import { recordTrace } from './trace.ts';
 import {
   AnswerSchema,
   ChangeNoticeSchema,
@@ -222,6 +223,18 @@ export class LocalNode {
     return activeMembers(this.ctx).filter((m) => canRead(this.ctx, this.memberIdentity(m.id), componentId));
   }
 
+  /** Admin members the manifest names as observers (experiment orgs), other than this node's own developer. */
+  observers(): string[] {
+    return this.manifest()?.manifest.observers ?? [];
+  }
+
+  private observerMembers(): Member[] {
+    return this.observers()
+      .filter((id) => id !== this.developer)
+      .map((id) => this.activeMember(id))
+      .filter((m): m is Member => !!m);
+  }
+
   /** Who should receive a question about a component: its owners, or the whole owning team when urgent. */
   responders(componentId: string, priority: Priority): Member[] {
     const component = getComponent(this.ctx, componentId);
@@ -242,8 +255,10 @@ export class LocalNode {
     subject?: string | null;
     component?: string | null;
   }): Promise<{ id: string; queued: boolean; online: string[] }> {
-    const recipients = message.to.filter((m) => m.id !== this.developer);
-    if (recipients.length === 0) throw new Error('No active recipients for this message.');
+    const intended = message.to.filter((m) => m.id !== this.developer);
+    if (intended.length === 0) throw new Error('No active recipients for this message.');
+    // Observers (experiment orgs) get a sealed copy too; they appear in the audience, so nobody is observed in secret.
+    const recipients = [...new Map([...intended, ...this.observerMembers()].map((m) => [m.id, m])).values()];
     const envelope = await sealEnvelope(this.keys, recipients, {
       kind: message.kind,
       priority: message.priority,
@@ -364,7 +379,9 @@ export class LocalNode {
     try {
       return this.ctx.db.tx(() => {
         if (this.processed(header.id)) return null;
-        const extra = this.handle(opened.header, opened.payload, opened.sender);
+        // An observer node records everything and acts on nothing, except the manifest that keeps it current.
+        if (this.settings.observer) recordTrace(this.ctx, opened.header, opened.payload);
+        const extra = this.settings.observer && opened.header.kind !== 'manifest' ? {} : this.handle(opened.header, opened.payload, opened.sender);
         this.ctx.db.run(
           "INSERT INTO processed_messages (id, seq, kind, sender, status, at) VALUES (:id, NULL, :kind, :sender, 'ok', :now)",
           { id: header.id, kind: header.kind, sender: header.sender, now: iso(this.ctx.now()) },

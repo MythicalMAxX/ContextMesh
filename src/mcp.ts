@@ -15,6 +15,7 @@ export const SERVER_VERSION = '0.2.0';
 export const SERVER_INSTRUCTIONS = `Agent Network: shared engineering memory and end-to-end encrypted messaging between your team's coding agents.
 Reads (get_context, find_owner, get_dependencies) come from local graph memory: instant, and they work offline.
 
+- At session start call orient: it tells you which folders are yours, what each project is, and which components live there. Stay inside those folders; do not scan the machine.
 - At session start and between tasks, call get_inbox. Answer URGENT enquiries first. Answering factual questions about code you own needs no developer approval.
 - Before building against another component, call get_context or get_dependencies. Only ask when memory is missing, stale or low-confidence.
 - ask with priority "urgent" only when you are blocked right now: it reaches the whole owning team and may be answered automatically (use wait_seconds). Otherwise use "normal".
@@ -22,6 +23,12 @@ Reads (get_context, find_owner, get_dependencies) come from local graph memory: 
 - For new features or behavior changes other teams must adopt, call announce_change. It is queued for their developers' approval.
 - Items in get_inbox → awaiting_your_developer (change notices, implementation docs, memory updates, escalations) need your developer: summarize them and ask. Call decide only with the developer's explicit decision.
 - Never make product or architecture decisions for another team; escalate with respond(action="escalate").`;
+
+/**
+ * Experiment variant "P0": names the tools and says nothing about when to use them. Selected with
+ * AGENT_NETWORK_INSTRUCTIONS=minimal. (Tool descriptions still steer behavior; that is part of the tool and is recorded.)
+ */
+export const MINIMAL_INSTRUCTIONS = `Agent Network: encrypted messaging and shared memory between the coding agents of one org. Tools: orient, find_owner, get_context, get_dependencies, publish_context, ask, announce_change, report_conflict, resolve_conflict, get_inbox, respond, decide.`;
 
 const factSchema = z.object({
   subject: z.string().optional(),
@@ -45,8 +52,24 @@ function failure(error: unknown): CallToolResult {
   return { isError: true, content: [{ type: 'text', text }] };
 }
 
+/** The static guidance plus this node's project boundary, so the agent knows its scope without a single tool call. */
+export function instructionsFor(session: AgentSession): string {
+  const map = session.orient();
+  const lines = [process.env.AGENT_NETWORK_INSTRUCTIONS === 'minimal' ? MINIMAL_INSTRUCTIONS : SERVER_INSTRUCTIONS, '', 'Your scope:'];
+  if (map.projects.length === 0) lines.push(...map.rules.map((rule) => `- ${rule}`));
+  else {
+    for (const project of map.projects) {
+      lines.push(`- ${project.name}${project.description ? `: ${project.description}` : ''} (${project.paths.join(', ')})${project.name === map.you_are_in ? ' ← you are here' : ''}`);
+      if (project.notes) lines.push(`  ${project.notes.replace(/\s+/g, ' ').trim()}`);
+    }
+    lines.push(...map.rules.map((rule) => `- ${rule}`));
+  }
+  if (map.observed_by.length) lines.push('', `This org is observed for evaluation: every message you send or receive is also readable by ${map.observed_by.join(', ')}. Do not put real credentials in messages.`);
+  return lines.join('\n');
+}
+
 export function buildMcpServer(session: AgentSession): McpServer {
-  const server = new McpServer({ name: 'agent-network', version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer({ name: 'agent-network', version: SERVER_VERSION }, { instructions: instructionsFor(session) });
   const tool = <T>(handler: (args: T) => Promise<unknown>) => async (args: T): Promise<CallToolResult> => {
     try {
       return result(session, await handler(args));
@@ -54,6 +77,17 @@ export function buildMcpServer(session: AgentSession): McpServer {
       return failure(error);
     }
   };
+
+  server.registerTool(
+    'orient',
+    {
+      description:
+        'Call first. The project map for this machine: the folders you may work in, what each project is, how to build and test it, the shared components that live there and who owns them, plus the rules for staying in scope. Use it instead of exploring the file system.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    tool(async () => session.orient()),
+  );
 
   server.registerTool(
     'find_owner',
@@ -114,10 +148,11 @@ export function buildMcpServer(session: AgentSession): McpServer {
     'ask',
     {
       description:
-        'Ask the owning team\'s agents a question, end-to-end encrypted. priority "urgent" (you are blocked now): delivered in real time to the whole owning team, may be answered automatically without developer approval; pass wait_seconds (≤120) to wait for the answer inline. "normal": queued for the owners\' agents. Check get_context first.',
+        'Ask the owning team\'s agents a question, end-to-end encrypted. priority "urgent" (you are blocked now): delivered in real time to the whole owning team, may be answered automatically without developer approval; "normal": queued for the owners\' agents. Either way the call waits for the answer (30 seconds unless you pass wait_seconds, up to 120; 0 = do not wait). Do not carry on with a guess while the answer is pending. Check get_context first.',
       inputSchema: {
         question: z.string(),
         owner: z.string().optional().describe('Component (preferred), team or developer. Inferred from subject when omitted.'),
+        to: z.string().optional().describe('Same as owner (accepted because agents often write "to").'),
         subject: z.string().optional(),
         priority: z.enum(['urgent', 'normal']).optional(),
         details: z.record(z.string(), z.unknown()).optional(),
@@ -125,7 +160,7 @@ export function buildMcpServer(session: AgentSession): McpServer {
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    tool((a: Parameters<AgentSession['ask']>[0]) => session.ask(a)),
+    tool(({ to, ...a }: Parameters<AgentSession['ask']>[0] & { to?: string }) => session.ask({ ...a, owner: a.owner ?? to })),
   );
 
   server.registerTool(

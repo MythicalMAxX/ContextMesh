@@ -60,8 +60,10 @@ export class HubClient {
     info() {
         return this.call('GET', '/info', { signed: false });
     }
-    init(cert, certSig, bootstrapToken) {
-        return this.call('POST', '/init', { body: { cert, cert_sig: certSig }, headers: { 'x-bootstrap-token': bootstrapToken }, signed: false });
+    /** Creates the org with this root. `auth` is the shared bootstrap token (self-hosted) or a provision ticket from your account. */
+    init(cert, certSig, auth) {
+        const headers = typeof auth === 'string' ? { 'x-bootstrap-token': auth } : { 'x-provision-ticket': auth.ticket };
+        return this.call('POST', '/init', { body: { cert, cert_sig: certSig }, headers, signed: false });
     }
     createInvite(record, sig) {
         return this.call('POST', '/invites', { body: { record, sig } });

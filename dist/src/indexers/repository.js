@@ -10,6 +10,7 @@ import { contractFacts, diffContracts, parseOpenApi } from '../contracts.js';
 import { applyCodeowners, parseCodeowners, storeCodeowners } from '../registry.js';
 import { endpointKey } from '../subjects.js';
 import { SYSTEM_IDENTITY } from '../types.js';
+import { insideRoots } from '../scope.js';
 import { fromJson, iso, unique } from '../util.js';
 const exec = promisify(execFile);
 async function git(cwd, args) {
@@ -25,6 +26,9 @@ async function checkout(ctx, repo) {
         const dir = resolveFrom(ctx.config, settings.path);
         if (!existsSync(dir))
             throw new Error(`path not found: ${dir}`);
+        if (ctx.config.scope_roots && !insideRoots(ctx.config.scope_roots, dir)) {
+            throw new Error(`${dir} is outside every project, so it was not read. Add it with "agent-network project add".`);
+        }
         const commit = await git(dir, ['rev-parse', 'HEAD']).catch(() => null);
         return { dir, commit };
     }
@@ -74,7 +78,7 @@ export async function indexRepository(ctx, repo) {
     ctx.db.tx(() => {
         const codeownersFile = ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS', '.gitlab/CODEOWNERS']
             .map((p) => join(dir, p))
-            .find(existsSync);
+            .find((file) => existsSync(file) && insideRoots([dir], file));
         const rules = codeownersFile ? parseCodeowners(readFileSync(codeownersFile, 'utf8')) : [];
         storeCodeowners(ctx, repo.id, rules);
         applyCodeowners(ctx, repo.id);
@@ -87,7 +91,7 @@ export async function indexRepository(ctx, repo) {
                 .filter((c) => c.id !== component.id && c.path && (!component.path || c.path.startsWith(`${component.path}/`)))
                 .map((c) => join(dir, c.path));
             const configured = ctx.config.components[component.id]?.openapi;
-            const specFiles = configured ? configured.map((f) => join(base, f)) : discoverSpecs(base, nested);
+            const specFiles = (configured ? configured.map((f) => join(base, f)) : discoverSpecs(base, nested)).filter((file) => insideRoots([dir], file));
             const summary = { component: component.id, spec_files: specFiles.map((f) => posix(relative(dir, f))), endpoints: 0, changed: 0, removed: 0, warnings: [] };
             const seenSlots = new Set();
             let allParsed = true;

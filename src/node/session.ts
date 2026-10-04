@@ -9,7 +9,8 @@ import { getContext, publishContext, recordAnswer, resolveSubject, upsertEntry, 
 import type { ContractChange } from '../contracts.ts';
 import { consumersOf, getDependencies } from '../dependencies.ts';
 import { conflict as conflictError, forbidden, invalid, notFound } from '../errors.ts';
-import { assertRead, assertWrite, canWrite, componentOwners, componentsOfTeam, endpointOwner, findOwner, getComponent, teamMembers } from '../registry.ts';
+import { assertRead, assertWrite, canRead, canWrite, componentOwners, componentsOfTeam, developerTeams, endpointOwner, findOwner, getComponent, listComponents, teamMembers } from '../registry.ts';
+import { activeProjects, currentProject, scopeRules } from '../scope.ts';
 import { subjectKey } from '../subjects.ts';
 import type { ConfidenceLevel, Identity } from '../types.ts';
 import { ageLabel, fromJson, iso, toJson, unique } from '../util.ts';
@@ -59,14 +60,17 @@ export class AgentSession {
   readonly agent: string;
   readonly component: string | null;
   readonly repository: string | null;
+  /** Directory the agent was started in; used to tell which project it is working on. */
+  readonly cwd: string | null;
   private lastSync = 0;
   offline: string | null = null;
 
-  constructor(node: LocalNode, options: { agent?: string; component?: string | null; repository?: string | null } = {}) {
+  constructor(node: LocalNode, options: { agent?: string; component?: string | null; repository?: string | null; cwd?: string | null } = {}) {
     this.node = node;
     this.agent = options.agent ?? 'agent';
     this.component = options.component ?? null;
     this.repository = options.repository ?? null;
+    this.cwd = options.cwd ?? null;
   }
 
   get ctx() {
@@ -116,6 +120,38 @@ export class AgentSession {
   // -------------------------------------------------------------------------
   // Reads: local graph memory
   // -------------------------------------------------------------------------
+
+  /**
+   * The project map: where to work, what each project is, and which shared components live there. Calling this first
+   * replaces exploring the machine to find out.
+   */
+  orient() {
+    const settings = this.node.settings;
+    const projects = activeProjects(settings);
+    const here = this.cwd ? currentProject(settings, this.cwd) : null;
+    const identity = this.identity;
+    const components = listComponents(this.ctx).filter((c) => canRead(this.ctx, identity, c.id));
+    const roots = projects.flatMap((p) => p.paths);
+    return {
+      workspace: settings.workspace ? { name: settings.workspace, description: settings.workspaces[settings.workspace]?.description ?? '' } : null,
+      you_are_in: here?.name ?? null,
+      projects: projects.map((p) => ({
+        name: p.name,
+        description: p.description || null,
+        paths: p.paths,
+        notes: p.notes,
+        repository: p.repository,
+        components: components
+          .filter((c) => p.repository && c.repository_id === p.repository)
+          .map((c) => ({ id: c.id, description: c.description, team: c.team_id, owners: componentOwners(this.ctx, c.id) })),
+      })),
+      other_components: components.filter((c) => !projects.some((p) => p.repository && c.repository_id === p.repository)).map((c) => ({ id: c.id, description: c.description, team: c.team_id })),
+      /** Experiment orgs: members who can read every message. Empty in a normal org. */
+      observed_by: this.node.observers(),
+      rules: scopeRules(roots),
+      next: projects.length ? ['get_inbox', 'get_context <component or endpoint> before building against it', 'find_owner <thing> when you need a person'] : ['Ask your developer to run: agent-network setup'],
+    };
+  }
 
   async findOwner(resource: string) {
     await this.sync();
@@ -213,7 +249,22 @@ export class AgentSession {
       const component = getComponent(this.ctx, owner);
       if (component) return { component: component.id, developer: null };
       const developer = this.ctx.db.get<{ id: string }>('SELECT id FROM developers WHERE id = :id COLLATE NOCASE', { id: owner });
-      if (developer) return { component: null, developer: developer.id };
+      if (developer) {
+        // An enquiry is always about a component: it is how the receiver finds the repository and how access is checked.
+        // `orient` lists owners by developer id, so agents often ask a person; resolve the component they stand for.
+        const owned = this.ctx.db.all<{ component_id: string }>('SELECT DISTINCT component_id FROM component_owners WHERE developer_id = :id', { id: developer.id }).map((r) => r.component_id);
+        const candidates = owned.length ? owned : developerTeams(this.ctx, developer.id).flatMap((team) => componentsOfTeam(this.ctx, team));
+        const named = subject ? (endpointOwner(this.ctx, subject)?.component ?? getComponent(this.ctx, subject)?.id ?? null) : null;
+        const component = candidates.length === 1 ? candidates[0]! : named && candidates.includes(named) ? named : null;
+        if (!component) {
+          throw invalid(
+            candidates.length
+              ? `${developer.id} is responsible for several components (${candidates.join(', ')}); pass the one you mean as "owner".`
+              : `${developer.id} does not own a component, so there is nothing to ask them about. Use find_owner.`,
+          );
+        }
+        return { component, developer: developer.id };
+      }
       const team = this.ctx.db.get<{ id: string }>('SELECT id FROM teams WHERE id = :id COLLATE NOCASE', { id: owner });
       if (team) {
         const components = componentsOfTeam(this.ctx, team.id);
@@ -242,11 +293,10 @@ export class AgentSession {
     if (to.length === 0) {
       throw invalid(`Nobody who owns ${target.component ?? target.developer} has joined the network yet, so there is no one to ask.`);
     }
-    const component = target.component ?? getComponent(this.ctx, target.developer ?? '')?.id ?? '';
     const payload: Enquiry = {
       question: input.question,
       subject: input.subject ?? null,
-      component: target.component ?? component,
+      component: target.component!,
       details: input.details ?? null,
       agent: this.agent,
       requester_component: this.identity.component,
@@ -264,11 +314,11 @@ export class AgentSession {
           ? `Delivered in real time to ${sent.online.join(', ')}.`
           : 'Nobody who can answer is online; the question is queued and will be delivered when their node connects.',
     };
-    const wait = Math.min(Math.max(input.wait_seconds ?? 0, 0), 120);
+    const wait = Math.min(Math.max(input.wait_seconds ?? this.node.settings.ask.default_wait_seconds, 0), 120);
     if (wait > 0 && !sent.queued) {
       const answer = await this.waitForReply(sent.id, wait);
       if (answer) result.answer = answer;
-      else result.status = `No answer within ${wait}s. Keep working and check get_inbox; the answer will arrive there.`;
+      else result.status = `No answer yet after ${wait}s. Do not guess the answer or build on an assumption about it. If you cannot continue without it, call get_inbox again shortly (the answer arrives there) or tell your developer what you are waiting for.`;
     }
     return result;
   }
