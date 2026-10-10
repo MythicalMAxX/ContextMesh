@@ -94,6 +94,8 @@ export const AnswerSchema = z.object({
   agent: text(100),
   auto: z.object({ responder: text(200) }).nullable().default(null),
   decided_by_human: z.boolean().default(false),
+  /** Set on a refusal by the receiving node or a person: no_relationship, no_access, expired, rate_limited, out_of_scope. */
+  reason_code: text(40).nullable().default(null),
 });
 export type Answer = z.infer<typeof AnswerSchema>;
 

@@ -21,7 +21,8 @@
     "shared",
     "examples",
     "README.md",
-    "SETUP.md"
+    "SETUP.md",
+    "AGENT-QUICKSTART.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -1,37 +1,60 @@
 # ContextMesh
 
-Shared engineering memory and end-to-end encrypted messaging between the coding agents (Claude Code, Codex, Cursor, …) of developers on different teams and networks.
+Human-authorized relationships between independently owned coding agents.
 
-This repository is the **client**: the local node every developer runs and the MCP server their agents talk to. The node keeps your org's shared knowledge in a local graph (contracts, owners, implementation status, decisions, earlier answers), exchanges encrypted messages with teammates' nodes through a ContextMesh hub, and holds items that need your approval.
+Coding agents increasingly depend on work that other people own: another team's API, a contractor's code, a service whose rules live in someone's head. ContextMesh lets those agents ask each other directly, end-to-end encrypted, while the **people** decide which agents may talk, what a relationship may cover, what is answered automatically, what needs approval, and when it ends. It sits above MCP (an agent's tools) and A2A (agents finding each other): it is the layer that says *who may ask whom about what*.
+
+This is an **experiment**. The question it tests: how many human interruptions can agents resolve between themselves without more mistakes or leaks? The design, the experiment and the results are in the project's documents; this repository is the **client** (the local node every developer runs and the tools their agents call).
 
 ```text
-Your agent ──stdio MCP──► your node (local graph memory, keys, approval queue) ◄──encrypted──► hub ◄──► teammates' nodes
+Your agent ──MCP or shell──► your node (local memory, keys, approval queue) ◄──encrypted──► hub ◄──► other nodes
 ```
 
-- **Local graph memory.** `get_context`, `find_owner` and `get_dependencies` answer instantly from local SQLite, even offline, so agents don't ask for things the org already knows.
-- **Change propagation.** Contracts, status and decisions you publish reach every member allowed to see that component. Updates from a component's owning team apply automatically. Everything else waits for your approval.
-- **Priority queue.**
-  - `urgent`: pushed in real time to the owning team; can be answered automatically by an always-on node running a read-only headless agent, with no approval.
-  - `normal`: waits for the owner's agent.
-  - `low`: change notices, implementation docs and memory updates, which wait for a developer's approval; the sender gets receipts.
+**You are an AI agent?** Read [AGENT-QUICKSTART.md](AGENT-QUICKSTART.md). It is one page of commands.
+**You are a person setting this up?** Follow the [setup guide](SETUP.md).
+
+## What it does
+
+- **Relationships, enforced where the answer is given.** The org manifest (signed by the org root) can list who may ask about which component, which files an answer may draw on, whether answers go out by themselves or wait for a person, and when the relationship ends. The **receiving** node checks this with its own copy of the manifest before anything is queued or any agent is started. A sender that skips its own check gets a `declined` answer with a reason code.
+- **Answers from a restricted copy.** When a relationship limits answers to some files, the answering agent is started in a folder holding only those files (secret-looking files left out, secret values redacted). It cannot quote what it was never shown.
+- **Safety basics.** Text containing keys, passwords or tokens is blocked before it is sent. Everything another party's agent writes is marked `untrusted`. A sender that repeats a question or fires a burst of questions at one component is stopped, as is any single asker that exceeds the hourly limit.
+- **Local graph memory.** `get_context`, `find_owner` and `get_dependencies` answer from local SQLite, even offline, so agents do not ask for what the org already knows.
 - **End-to-end encryption.** The hub only relays ciphertext. It cannot read, forge or alter messages, and it cannot add members.
+- **Two ways in.** Agents that can run an MCP server use it; agents that only have a shell use `agent-network call`, `inbox --wait` and `doctor`. Both run the same tools.
 
-**New here? Follow the step-by-step [setup guide](SETUP.md)** (install, join or create an org, run your node, connect your agent).
+## A relationship
 
-- **Agents stay inside your project.** Tell the node your project folder(s) and what the project is (`agent-network setup`). Agents are given that map up front, so they do not roam your computer burning usage, and the node itself never reads outside it.
-- **You choose the model.** Background work (like auto-answering urgent questions) runs on the tool and model you pick, such as Claude Code with haiku, Codex, another CLI, or a private API endpoint. Nothing defaults to the most expensive model.
+```yaml
+policy:
+  relationships: strict            # asking needs a relationship (owners, their team and admins excepted)
+
+relationships:
+  contractor-api-docs:
+    from: { developers: [carol] }
+    about: { components: [orders-api] }
+    may: [ask]
+    answers: auto                  # or: approval (a person approves every answer)
+    scope: [docs/api/**]           # the only files an answer may draw on
+    expires: 2026-12-31
+```
+
+A relationship that is not listed does not exist. `answers: auto` requires an explicit `scope` (`["**"]` means the whole component, on purpose). See [`examples/org.yaml`](examples/org.yaml) for a full manifest.
+
+**Known limit.** The restricted copy is enforced for the node's own auto-responder. An interactive agent that answers through the `respond` tool can read its whole repository, so for it the scope is shown with the question and `answers: approval` puts the draft in front of a person. The experiment measures how well that holds.
 
 ## Install
 
-Requires Node.js ≥ 22.18 and git.
+Requires Node.js ≥ 22.18. No root needed:
 
 ```bash
-npm install -g https://github.com/MythicalMAxX/ContextMesh/tarball/personal
+npm install -g --prefix "$HOME/.local" https://github.com/MythicalMAxX/ContextMesh/tarball/relationship-experiment
+export PATH="$HOME/.local/bin:$PATH"
+agent-network doctor
 ```
 
-This installs the `agent-network` command. Use the tarball URL rather than `github:MythicalMAxX/ContextMesh`: with npm 11 on Windows, a global install from a `github:` spec leaves a link to a temporary clone that npm deletes afterwards. Your node lives in `~/.agent-network` (override with `--home` or `AGENT_NETWORK_HOME`).
+Use the tarball URL rather than `github:MythicalMAxX/ContextMesh`: with npm 11 on Windows, a global install from a `github:` spec leaves a link to a temporary clone that npm deletes afterwards. Your node lives in `~/.agent-network` (override with `--home` or `AGENT_NETWORK_HOME`). `agent-network doctor` checks Node, the hub, your clock and whether you are approved, and prints the fix for each problem; it works on any Node version.
 
-## Join your org
+## Join an org
 
 Your org admin sends you a single-use invite code over a trusted channel:
 
@@ -39,29 +62,23 @@ Your org admin sends you a single-use invite code over a trusted channel:
 agent-network join <invite-code>
 ```
 
-`join` prints your key fingerprint. Tell your admin, so they can approve you after comparing it:
+`join` prints your key fingerprint. Tell your admin, who approves you after comparing it:
 
 ```bash
 agent-network org approve <you> --fingerprint <your-fingerprint>
 ```
 
-Then add your local repositories and options to `~/.agent-network/node.yaml` (see [`examples/node.yaml`](examples/node.yaml)) and keep your node running:
-
-```bash
-agent-network run
-```
-
-`run` keeps a live connection to the hub, re-indexes your repositories (OpenAPI, CODEOWNERS), optionally auto-answers urgent questions, and serves your approvals dashboard at the printed `http://127.0.0.1:7421/?token=…` link.
+Keep a node connected with `agent-network run` (live sync, indexing, auto-responder, approvals dashboard), or use the shell commands below, which sync on demand.
 
 ## Connect your agent
 
-Claude Code:
+MCP (Claude Code):
 
 ```bash
 claude mcp add agent-network -- agent-network mcp --agent claude-code
 ```
 
-Codex (`~/.codex/config.toml`):
+MCP (Codex, `~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.agent-network]
@@ -69,48 +86,39 @@ command = "agent-network"
 args = ["mcp", "--agent", "codex"]
 ```
 
-The component is inferred from the working directory when it is inside a repository listed in `node.yaml`; otherwise pass `--component <id>`.
+Shell (any agent that can run commands):
+
+```bash
+agent-network tools                                  # the tools and their arguments
+agent-network call ask --json '{"owner":"orders-api","question":"..."}'
+agent-network inbox --wait 60                        # blocks until something needs you
+```
+
+Output is one JSON object (`{"ok":true,"result":...}` or `{"ok":false,"error":...}`). In our tests Codex and Claude Haiku did not use the tools unless a rules file (`AGENTS.md`, `CLAUDE.md`) told them when to ask; the MCP `instructions` field had no effect on them.
 
 | Tool | Purpose |
 |---|---|
-| `get_context`, `find_owner`, `get_dependencies` | Read local graph memory: contracts, status, freshness, confidence, conflicts, decisions, earlier answers |
+| `orient` | The project map: folders, components, owners, the rules for staying in scope |
+| `get_context`, `find_owner`, `get_dependencies` | Read local memory: contracts, status, freshness, conflicts, decisions, earlier answers |
 | `publish_context` | Share contracts, status and notes; breaking contract changes notify consuming teams |
-| `ask` | Enquiry with `priority` `urgent` or `normal`; `wait_seconds` waits inline for the answer |
-| `announce_change` | Change notice or implementation doc, queued for the recipients' developer approval |
+| `ask` | Put a question to the owning team's agent; waits for the answer (30 s by default) |
+| `announce_change` | Change notice or implementation doc, queued for the recipients' approval |
 | `report_conflict`, `resolve_conflict` | Disagreeing sources; settlements spread to every node |
-| `get_inbox` | Enquiries to answer, answers, receipts, items awaiting your approval, approved work |
-| `respond` | Answer, decline or escalate an enquiry or conflict |
-| `decide` | Record your explicit decision: approve, reject, defer, done, or answer an escalation |
-
-You can also decide from the terminal:
-
-```bash
-agent-network queue
-```
-
-```bash
-agent-network decide <item-id> approve --note "will implement next sprint"
-```
+| `get_inbox` | Questions to answer, answers, receipts, items awaiting a person, approved work |
+| `respond` | Answer, decline or escalate a question; held for approval where the relationship says so |
+| `decide` | Record **a person's** decision: approve, reject, defer, done, or answer an escalation |
 
 ## For org admins
 
-The admin who creates an org becomes its **root**. The root's key signs every member certificate and the ownership manifest (teams, developers, components, visibility), and every member pins it at join time. You need a hub URL and a bootstrap token from your hub operator:
+The admin who creates an org becomes its **root**. The root's key signs every member certificate and the manifest (teams, developers, components, visibility, relationships), and every member pins it at join time.
 
 ```bash
 agent-network org init --hub <hub-url> --org <org-id> --developer <you> --manifest org.yaml
-```
-
-Then invite and manage members:
-
-```bash
 agent-network org invite <developer>
+agent-network org manifest org.yaml        # publish a changed manifest; revocations and expiries take effect on the next question
 ```
 
-```bash
-agent-network org manifest org.yaml
-```
-
-`org pending`, `org approve` and `org revoke` handle the rest. [`examples/org.yaml`](examples/org.yaml) shows a manifest. Back up `~/.agent-network/identity.json` on the root machine: it is your org's trust anchor.
+`org pending`, `org approve` and `org revoke` handle the rest. Back up `~/.agent-network/identity.json` on the root machine: it is your org's trust anchor.
 
 ## Security model
 
@@ -120,24 +128,22 @@ agent-network org manifest org.yaml
 | Authenticity | Payloads are signed with the sender's Ed25519 key together with the header, and verified against root-signed member certificates. |
 | Integrity | The header is AES-GCM associated data and key wraps are bound to message and recipient, so tampering, metadata swaps and moved wraps are rejected. |
 | Membership | The root key is pinned from the invite. A malicious hub cannot inject members or swap keys. Revocations are root-signed. |
-| Access control | Restricted components are only encrypted for their team, reader teams and org admins. |
+| Authorization | The receiving node decides, from the signed manifest, whether a question may be asked and what the answer may use. |
 | Hub authentication | Every request is signed (timestamp + nonce, replay rejected); there are no bearer tokens. |
-| Keys at rest | `~/.agent-network/identity.json` (mode 0600). Set `AGENT_NETWORK_PASSPHRASE` before `join`/`org init` to encrypt it (PBKDF2 + AES-GCM). |
+| Keys at rest | `~/.agent-network/identity.json` (mode 0600). Set `AGENT_NETWORK_PASSPHRASE` before `join`/`org init` to encrypt it. |
 
-The hub can see member ids and public keys, who sent what kind of message to whom, priority, size and timing, and it can delay or drop messages. There is no forward secrecy: a stolen private key decrypts that member's messages until they expire from the hub (1 to 30 days). Org admins can read restricted components. The cryptography lives in [`shared/crypto.ts`](shared/crypto.ts) and [`src/node/envelope.ts`](src/node/envelope.ts) for review.
+The hub can see member ids and public keys, who sent what kind of message to whom, priority, size and timing, and it can delay or drop messages. There is no forward secrecy: a stolen private key decrypts that member's messages until they expire from the hub (1 to 30 days). Org admins can read restricted components. In an **experiment** org the manifest can name observers, who receive a copy of every message; they are listed in every message's audience and in the agents' instructions, so nobody is observed in secret. The cryptography lives in [`shared/crypto.ts`](shared/crypto.ts) and [`src/node/envelope.ts`](src/node/envelope.ts) for review.
+
+## Limitations
+
+- Version 0 of relationships knows one permission (`ask`), file-glob scopes, and relationships inside one org. Relationships across independent organizations are not built.
+- The secret scan has a short list of high-confidence patterns; a credential in an unusual shape gets through.
+- The auto-responder runs the command you configure on questions from other org members. Keep it read-only; it is off by default.
+- The Jira and Linear task connectors follow their public APIs but have not been run against live instances.
 
 ## Development
 
 ```bash
 npm install
-```
-
-```bash
 npm test
 ```
-
-## Limitations
-
-- The Jira and Linear task connectors follow their public APIs but have not been run against live instances.
-- The auto-responder runs the command you configure on questions from other org members. Keep it read-only (e.g. `claude -p --allowedTools Read,Grep,Glob`); it is off by default.
-- Task-text claim extraction is conservative pattern matching; code-level facts come from agents via `publish_context`.

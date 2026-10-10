@@ -43,3 +43,17 @@ components:
     description: Payroll runs and compensation
     repository: payroll-service
     visibility: restricted   # encrypted only for the payroll team (and org admins)
+
+# Relationships (optional). With "policy.relationships: open" (the default) they are listed but not enforced: only visibility decides.
+# Set it to "strict" and asking about a component needs one of these (owners, their own team and admins are exempt). Whoever
+# answers sees the scope, and the auto-responder is started in a copy that holds only the files that match it.
+policy:
+  relationships: open
+relationships:
+  frontend-asks-recommendations:
+    from: { teams: [frontend] }
+    about: { components: [recommendation-engine] }
+    may: [ask]
+    answers: auto          # or: approval (a person approves every answer)
+    scope: ["docs/**", "openapi.yaml"]
+    expires: 2026-12-31

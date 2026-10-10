@@ -12,6 +12,7 @@ import { Db } from '../db.js';
 import { indexAll } from '../indexers/index.js';
 import { storeTasks } from '../indexers/tasks.js';
 import { addEdge, canRead, canWrite, componentOwners, developerTeams, getComponent, syncConfig, teamMembers } from '../registry.js';
+import { authorizeAsk } from '../relationships.js';
 import { subjectKey } from '../subjects.js';
 import { SYSTEM_IDENTITY } from '../types.js';
 import { fromJson, iso, toJson, unique } from '../util.js';
@@ -311,8 +312,9 @@ export class LocalNode {
                 return this.reject(header, error);
             }
         }
+        let result;
         try {
-            return this.ctx.db.tx(() => {
+            result = this.ctx.db.tx(() => {
                 if (this.processed(header.id))
                     return null;
                 // An observer node records everything and acts on nothing, except the manifest that keeps it current.
@@ -326,6 +328,53 @@ export class LocalNode {
         catch (error) {
             return this.reject(header, error);
         }
+        // A refused question is answered with a normal, machine-readable "declined"; the asker's agent already understands answers.
+        if (result?.denied)
+            await this.sendDenial(header, opened.sender, result.denied);
+        return result;
+    }
+    async sendDenial(header, asker, denial) {
+        const answer = {
+            status: 'declined',
+            answer: `${denial.reason} (${denial.code})`,
+            evidence: [],
+            confidence: null,
+            agent: 'node (relationship check)',
+            auto: null,
+            decided_by_human: false,
+            reason_code: denial.code,
+        };
+        try {
+            await this.send({ kind: 'answer', priority: 'normal', to: [asker], payload: answer, replyTo: header.id });
+        }
+        catch (error) {
+            this.ctx.log(`could not tell ${asker.id} that ${header.id} was declined: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    /**
+     * Decides, on this node and with its own signed manifest, whether a question may be put to its owners at all. It runs before
+     * anything is queued or any agent is started, so a sender that skipped its own check gets nothing.
+     */
+    admit(sender, componentId, header) {
+        const verdict = authorizeAsk(this.ctx, this.memberIdentity(sender.id), componentId, this.ctx.now());
+        if (!verdict.allowed)
+            return { denial: verdict };
+        const since = iso(new Date(this.ctx.now().getTime() - 3_600_000));
+        const recent = this.ctx.db.get("SELECT count(*) AS n FROM inbox WHERE kind IN ('enquiry', 'conflict_report') AND sender = :sender AND component_id = :component AND received_at > :since AND id != :id", { sender: sender.id, component: componentId, since, id: header.id }).n;
+        const limit = this.settings.limits.asks_per_hour;
+        if (recent >= limit) {
+            return { denial: { allowed: false, code: 'rate_limited', reason: `${sender.id} has already asked ${recent} question(s) about ${componentId} in the last hour (the limit is ${limit}).` } };
+        }
+        return { grant: verdict };
+    }
+    refuse(header, sender, denial, componentId) {
+        audit(this.ctx, this.memberIdentity(sender.id), 'enquiry.denied', {
+            subject: componentId,
+            request_id: header.id,
+            details: { kind: header.kind, code: denial.code, reason: denial.reason },
+        });
+        this.ctx.log(`declined ${header.kind} ${header.id} from ${sender.id} about ${componentId ?? '?'}: ${denial.code}`);
+        return { denied: denial };
     }
     reject(header, error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -335,8 +384,8 @@ export class LocalNode {
         return { id: header.id, kind: header.kind, priority: header.priority, sender: header.sender, status: 'rejected' };
     }
     inboxInsert(header, fields) {
-        this.ctx.db.run(`INSERT OR IGNORE INTO inbox (id, kind, priority, sender, subject, component_id, payload, state, reply_to, created_at, received_at, expires_at)
-       VALUES (:id, :kind, :priority, :sender, :subject, :component, :payload, :state, :replyTo, :created, :now, :expires)`, {
+        this.ctx.db.run(`INSERT OR IGNORE INTO inbox (id, kind, priority, sender, subject, component_id, payload, state, reply_to, created_at, received_at, expires_at, relationship)
+       VALUES (:id, :kind, :priority, :sender, :subject, :component, :payload, :state, :replyTo, :created, :now, :expires, :relationship)`, {
             id: header.id,
             kind: fields.kind ?? header.kind,
             priority: header.priority,
@@ -349,6 +398,7 @@ export class LocalNode {
             created: header.created_at,
             now: iso(this.ctx.now()),
             expires: header.expires_at,
+            relationship: fields.grant ? toJson({ via: fields.grant.via, relationship: fields.grant.relationship, answers: fields.grant.answers, scope: fields.grant.scope }) : null,
         });
     }
     appendReply(header, payload) {
@@ -389,8 +439,12 @@ export class LocalNode {
             }
             case 'enquiry': {
                 const enquiry = EnquirySchema.parse(raw);
-                this.inboxInsert(header, { state: 'open', subject: enquiry.subject, component: enquiry.component, payload: enquiry });
-                return { urgentEnquiry: header.priority === 'urgent' && canWrite(this.ctx, this.me(), enquiry.component) };
+                const admitted = this.admit(sender, enquiry.component, header);
+                if ('denial' in admitted)
+                    return this.refuse(header, sender, admitted.denial, enquiry.component);
+                this.inboxInsert(header, { state: 'open', subject: enquiry.subject, component: enquiry.component, payload: enquiry, grant: admitted.grant });
+                // Only answers a relationship lets go out by themselves are given to the auto-responder; the rest wait for a person.
+                return { urgentEnquiry: header.priority === 'urgent' && admitted.grant.answers === 'auto' && canWrite(this.ctx, this.me(), enquiry.component) };
             }
             case 'answer': {
                 const answer = AnswerSchema.parse(raw);
@@ -400,8 +454,11 @@ export class LocalNode {
             }
             case 'conflict_report': {
                 const report = ConflictReportSchema.parse(raw);
+                const admitted = this.admit(sender, report.component, header);
+                if ('denial' in admitted)
+                    return this.refuse(header, sender, admitted.denial, report.component);
                 recordReportedConflict(this.ctx, header.id, { ...from, agent: report.agent }, report);
-                this.inboxInsert(header, { state: 'open', subject: report.subject, component: report.component, payload: report });
+                this.inboxInsert(header, { state: 'open', subject: report.subject, component: report.component, payload: report, grant: admitted.grant });
                 return {};
             }
             case 'change_notice':

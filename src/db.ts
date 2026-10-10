@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS processed_messages (
 CREATE TABLE IF NOT EXISTS inbox (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, priority TEXT NOT NULL, sender TEXT NOT NULL, subject TEXT, component_id TEXT,
   payload TEXT NOT NULL, state TEXT NOT NULL, reply_to TEXT, created_at TEXT NOT NULL, received_at TEXT NOT NULL,
-  expires_at TEXT, handled_at TEXT, handled_by TEXT, decision TEXT, note TEXT, auto INTEGER NOT NULL DEFAULT 0
+  expires_at TEXT, handled_at TEXT, handled_by TEXT, decision TEXT, note TEXT, auto INTEGER NOT NULL DEFAULT 0,
+  relationship TEXT
 );
 CREATE INDEX IF NOT EXISTS inbox_state ON inbox (state, priority);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -135,6 +136,9 @@ export class Db {
     this.raw = new DatabaseSync(file);
     this.raw.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.raw.exec(SCHEMA);
+    // Nodes created before relationships existed lack the column that records which grant admitted a question.
+    const columns = this.raw.prepare('PRAGMA table_info(inbox)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'relationship')) this.raw.exec('ALTER TABLE inbox ADD COLUMN relationship TEXT');
   }
 
   private statement(sql: string): StatementSync {

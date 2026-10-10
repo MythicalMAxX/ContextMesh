@@ -36,11 +36,36 @@ const ComponentSchema = z.object({
     /** APIs or components this component depends on, e.g. "GET /api/resources/{id}" or "resource-service". */
     consumes: z.array(z.string()).default([]),
 });
+/**
+ * A relationship says who may ask about what, what an answer may draw on, and whether answers go out by themselves or wait for
+ * a person (docs/RELATIONSHIPS.md). The manifest is the only authority; every node checks the signed copy it holds.
+ */
+const RelationshipSchema = z.object({
+    /** Who may ask: members of these teams and/or these developers. */
+    from: z.object({ teams: z.array(id).default([]), developers: z.array(id).default([]) }),
+    /** What they may ask about. */
+    about: z.object({ components: z.array(id).min(1, 'name at least one component') }),
+    /** Version 0 knows only "ask". */
+    may: z.array(z.enum(['ask'])).min(1).default(['ask']),
+    /** auto: the owner's agent answers by itself; approval: a person approves every answer. */
+    answers: z.enum(['auto', 'approval']).default('approval'),
+    /** Files (globs, relative to the component) an answer may draw on. Required for auto answers; `**` means the whole component. */
+    scope: z.array(z.string().min(1)).optional(),
+    /** Last day (YYYY-MM-DD, inclusive) the relationship is in force. */
+    expires: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/, 'use a date like 2026-12-31')
+        .optional(),
+    note: z.string().optional(),
+});
 export const ManifestSchema = z.object({
     organization: z.string().optional(),
     teams: z.record(id, TeamSchema).default({}),
     developers: z.record(id, DeveloperSchema).default({}),
     components: z.record(id, ComponentSchema).default({}),
+    /** open: only component visibility decides who may ask. strict: asking also needs a relationship (owners, their team and admins excepted). */
+    policy: z.object({ relationships: z.enum(['open', 'strict']).default('open') }).prefault({}),
+    relationships: z.record(id, RelationshipSchema).default({}),
     /**
      * Experiment orgs only: admin members who receive a sealed copy of every message and write it to a trace. This is a
      * deliberate break of "the relay and other members cannot read your messages", so it is visible: observers appear in every
@@ -90,6 +115,25 @@ export function validateManifest(raw) {
             problems.push(`observers: unknown developer "${observer}"`);
         else if (!manifest.developers[observer].admin)
             problems.push(`observers: "${observer}" must be an admin`);
+    }
+    for (const [name, relationship] of Object.entries(manifest.relationships)) {
+        const where = `relationships.${name}`;
+        if (relationship.from.teams.length + relationship.from.developers.length === 0)
+            problems.push(`${where}.from: name at least one team or developer`);
+        for (const team of relationship.from.teams)
+            if (!teams.has(team))
+                problems.push(`${where}.from: unknown team "${team}"`);
+        for (const developer of relationship.from.developers)
+            if (!developers.has(developer))
+                problems.push(`${where}.from: unknown developer "${developer}"`);
+        for (const component of relationship.about.components)
+            if (!components.has(component))
+                problems.push(`${where}.about: unknown component "${component}"`);
+        if (relationship.answers === 'auto' && !relationship.scope?.length) {
+            problems.push(`${where}: automatic answers need an explicit scope (use ["**"] to say "the whole component" on purpose)`);
+        }
+        if (relationship.expires && Number.isNaN(Date.parse(`${relationship.expires}T00:00:00Z`)))
+            problems.push(`${where}.expires: "${relationship.expires}" is not a date`);
     }
     if (problems.length)
         throw new Error(`Invalid manifest:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
@@ -246,6 +290,22 @@ export const NodeConfigSchema = z.object({
      * guess and finish before it arrives (docs/results/E1-pilot.md, F-04 and F-09), so the default is to wait.
      */
     ask: z.object({ default_wait_seconds: z.number().min(0).max(120).default(30) }).prefault({}),
+    /** Limits that keep two automated agents from talking forever, and where scoped answers are prepared (docs/RELATIONSHIPS.md). */
+    limits: z
+        .object({
+        /** Questions one asker may put to one component per hour; the receiver declines the rest with `rate_limited`. */
+        asks_per_hour: z.number().int().positive().default(10),
+        /** Questions this node's agents may send to one component within `burst_minutes`; the sender refuses the rest. */
+        ask_burst: z.number().int().positive().default(6),
+        burst_minutes: z.number().positive().default(10),
+        /** The same question to the same component more than this many times within `burst_minutes` is refused. */
+        repeat_asks: z.number().int().positive().default(3),
+        /** Folder where scoped answering copies are made. Default: the system temporary folder. */
+        corpus_dir: z.string().optional(),
+    })
+        .prefault({}),
+    /** Strings that must never leave this node (per-node canaries); text containing one is blocked like any other secret. */
+    secrets: z.object({ canaries: z.array(z.string().min(4)).default([]) }).prefault({}),
 });
 export function parseNodeConfig(raw, baseDir) {
     const parsed = NodeConfigSchema.safeParse(raw ?? {});
@@ -319,6 +379,8 @@ export function composeConfig(manifest, node) {
         teams: manifest?.teams ?? {},
         developers: manifest?.developers ?? {},
         components: manifest?.components ?? {},
+        policy: manifest?.policy ?? { relationships: 'open' },
+        relationships: manifest?.relationships ?? {},
         repositories,
         tasks: node.tasks,
         repo_cache: node.repo_cache,

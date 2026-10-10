@@ -13,6 +13,7 @@ import { Db } from '../db.ts';
 import { indexAll, type IndexReport } from '../indexers/index.ts';
 import { storeTasks, type TaskRecord } from '../indexers/tasks.ts';
 import { addEdge, canRead, canWrite, componentOwners, developerTeams, getComponent, syncConfig, teamMembers } from '../registry.ts';
+import { authorizeAsk, type Denial, type Grant } from '../relationships.ts';
 import { subjectKey } from '../subjects.ts';
 import { SYSTEM_IDENTITY, type Ctx, type Identity } from '../types.ts';
 import { fromJson, iso, toJson, unique } from '../util.ts';
@@ -23,6 +24,7 @@ import { loadIdentity, type Keys } from './identity.ts';
 import { recordTrace } from './trace.ts';
 import {
   AnswerSchema,
+  type Answer,
   ChangeNoticeSchema,
   ConflictReportSchema,
   EnquirySchema,
@@ -50,6 +52,8 @@ export interface ProcessResult {
   status: 'ok' | 'rejected';
   /** Urgent enquiries addressed to this node, which the auto-responder may answer. */
   urgentEnquiry?: boolean;
+  /** The question was refused by the relationship check; the asker is told with a declined answer. */
+  denied?: Denial;
 }
 
 export const emptyUpdate = (): GraphUpdate => ({ entries: [], retired: [], reconfirmed: [], tasks: [], repositories: [], settlements: [] });
@@ -376,8 +380,9 @@ export class LocalNode {
         return this.reject(header, error);
       }
     }
+    let result: ProcessResult | null;
     try {
-      return this.ctx.db.tx(() => {
+      result = this.ctx.db.tx(() => {
         if (this.processed(header.id)) return null;
         // An observer node records everything and acts on nothing, except the manifest that keeps it current.
         if (this.settings.observer) recordTrace(this.ctx, opened.header, opened.payload);
@@ -391,6 +396,56 @@ export class LocalNode {
     } catch (error) {
       return this.reject(header, error);
     }
+    // A refused question is answered with a normal, machine-readable "declined"; the asker's agent already understands answers.
+    if (result?.denied) await this.sendDenial(header, opened.sender, result.denied);
+    return result;
+  }
+
+  private async sendDenial(header: EnvelopeHeader, asker: Member, denial: Denial): Promise<void> {
+    const answer: Answer = {
+      status: 'declined',
+      answer: `${denial.reason} (${denial.code})`,
+      evidence: [],
+      confidence: null,
+      agent: 'node (relationship check)',
+      auto: null,
+      decided_by_human: false,
+      reason_code: denial.code,
+    };
+    try {
+      await this.send({ kind: 'answer', priority: 'normal', to: [asker], payload: answer, replyTo: header.id });
+    } catch (error) {
+      this.ctx.log(`could not tell ${asker.id} that ${header.id} was declined: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Decides, on this node and with its own signed manifest, whether a question may be put to its owners at all. It runs before
+   * anything is queued or any agent is started, so a sender that skipped its own check gets nothing.
+   */
+  private admit(sender: Member, componentId: string | null, header: EnvelopeHeader): { grant: Grant } | { denial: Denial } {
+    const verdict = authorizeAsk(this.ctx, this.memberIdentity(sender.id), componentId, this.ctx.now());
+    if (!verdict.allowed) return { denial: verdict };
+    const since = iso(new Date(this.ctx.now().getTime() - 3_600_000));
+    const recent = this.ctx.db.get<{ n: number }>(
+      "SELECT count(*) AS n FROM inbox WHERE kind IN ('enquiry', 'conflict_report') AND sender = :sender AND component_id = :component AND received_at > :since AND id != :id",
+      { sender: sender.id, component: componentId, since, id: header.id },
+    )!.n;
+    const limit = this.settings.limits.asks_per_hour;
+    if (recent >= limit) {
+      return { denial: { allowed: false, code: 'rate_limited', reason: `${sender.id} has already asked ${recent} question(s) about ${componentId} in the last hour (the limit is ${limit}).` } };
+    }
+    return { grant: verdict };
+  }
+
+  private refuse(header: EnvelopeHeader, sender: Member, denial: Denial, componentId: string | null): Partial<ProcessResult> {
+    audit(this.ctx, this.memberIdentity(sender.id), 'enquiry.denied', {
+      subject: componentId,
+      request_id: header.id,
+      details: { kind: header.kind, code: denial.code, reason: denial.reason },
+    });
+    this.ctx.log(`declined ${header.kind} ${header.id} from ${sender.id} about ${componentId ?? '?'}: ${denial.code}`);
+    return { denied: denial };
   }
 
   private reject(header: EnvelopeHeader, error: unknown): ProcessResult {
@@ -404,10 +459,10 @@ export class LocalNode {
     return { id: header.id, kind: header.kind, priority: header.priority, sender: header.sender, status: 'rejected' };
   }
 
-  private inboxInsert(header: EnvelopeHeader, fields: { kind?: string; state: string; subject?: string | null; component?: string | null; payload: unknown }): void {
+  private inboxInsert(header: EnvelopeHeader, fields: { kind?: string; state: string; subject?: string | null; component?: string | null; payload: unknown; grant?: Grant }): void {
     this.ctx.db.run(
-      `INSERT OR IGNORE INTO inbox (id, kind, priority, sender, subject, component_id, payload, state, reply_to, created_at, received_at, expires_at)
-       VALUES (:id, :kind, :priority, :sender, :subject, :component, :payload, :state, :replyTo, :created, :now, :expires)`,
+      `INSERT OR IGNORE INTO inbox (id, kind, priority, sender, subject, component_id, payload, state, reply_to, created_at, received_at, expires_at, relationship)
+       VALUES (:id, :kind, :priority, :sender, :subject, :component, :payload, :state, :replyTo, :created, :now, :expires, :relationship)`,
       {
         id: header.id,
         kind: fields.kind ?? header.kind,
@@ -421,6 +476,7 @@ export class LocalNode {
         created: header.created_at,
         now: iso(this.ctx.now()),
         expires: header.expires_at,
+        relationship: fields.grant ? toJson({ via: fields.grant.via, relationship: fields.grant.relationship, answers: fields.grant.answers, scope: fields.grant.scope }) : null,
       },
     );
   }
@@ -460,8 +516,11 @@ export class LocalNode {
       }
       case 'enquiry': {
         const enquiry = EnquirySchema.parse(raw);
-        this.inboxInsert(header, { state: 'open', subject: enquiry.subject, component: enquiry.component, payload: enquiry });
-        return { urgentEnquiry: header.priority === 'urgent' && canWrite(this.ctx, this.me(), enquiry.component) };
+        const admitted = this.admit(sender, enquiry.component, header);
+        if ('denial' in admitted) return this.refuse(header, sender, admitted.denial, enquiry.component);
+        this.inboxInsert(header, { state: 'open', subject: enquiry.subject, component: enquiry.component, payload: enquiry, grant: admitted.grant });
+        // Only answers a relationship lets go out by themselves are given to the auto-responder; the rest wait for a person.
+        return { urgentEnquiry: header.priority === 'urgent' && admitted.grant.answers === 'auto' && canWrite(this.ctx, this.me(), enquiry.component) };
       }
       case 'answer': {
         const answer = AnswerSchema.parse(raw);
@@ -471,8 +530,10 @@ export class LocalNode {
       }
       case 'conflict_report': {
         const report = ConflictReportSchema.parse(raw);
+        const admitted = this.admit(sender, report.component, header);
+        if ('denial' in admitted) return this.refuse(header, sender, admitted.denial, report.component);
         recordReportedConflict(this.ctx, header.id, { ...from, agent: report.agent }, report);
-        this.inboxInsert(header, { state: 'open', subject: report.subject, component: report.component, payload: report });
+        this.inboxInsert(header, { state: 'open', subject: report.subject, component: report.component, payload: report, grant: admitted.grant });
         return {};
       }
       case 'change_notice':

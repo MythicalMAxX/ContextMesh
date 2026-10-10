@@ -38,7 +38,7 @@ You need:
 ## 2. Install the client
 
 ```bash
-npm install -g https://github.com/MythicalMAxX/ContextMesh/tarball/personal
+npm install -g https://github.com/MythicalMAxX/ContextMesh/tarball/relationship-experiment
 ```
 
 Check it worked:

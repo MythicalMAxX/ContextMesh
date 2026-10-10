@@ -32,10 +32,14 @@ Set up your projects and agent (works before you join, no hub needed):
   scope [project] [--tool claude-code|codex|cursor|generic] [--write]   Rules that keep agents inside your project
 
 Every developer:
+  doctor [--hub URL]                           Check this computer: Node version, hub, clock, whether you are approved, with the fix for each problem
   join <invite-code> [--name N]                Create your keys and request membership
   orient                                       The project map your agent receives
   run                                          Keep your node connected: realtime sync, indexing, auto-responder, dashboard
   mcp [--agent A] [--component C]              Stdio MCP server for your coding agent (configure it in your agent)
+  tools                                        The tools an agent can use, with their arguments
+  call <tool> [--json '{...}' | --json-file F] Run one tool from the shell (same tools and arguments as the MCP server); prints JSON
+  inbox [--wait SECONDS]                       Your queue; with --wait, blocks until something needs you (or the time is up)
   status | sync | index
   trace export [--run ID] [--out FILE]         Observer nodes only: the recorded messages as JSON lines (experiments)
   queue                                       Items waiting for your approval
@@ -90,12 +94,33 @@ async function main(): Promise<void> {
       'enable-responder': { type: 'boolean' },
       'scope-check': { type: 'boolean' },
       write: { type: 'boolean' },
+      json: { type: 'string' },
+      'json-file': { type: 'string' },
+      wait: { type: 'string' },
+      'as-json': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
   const [command, sub, arg, arg2] = positionals;
   if (!command || values.help || command === 'help') return void process.stdout.write(HELP);
   const home = homeDir(values.home);
+
+  // Runs before anything that needs a newer Node, so an old Node gets a clear message instead of a stack trace.
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
+  if ((major < 22 || (major === 22 && minor < 18)) && command !== 'doctor') {
+    throw new Error(`agent-network needs Node.js 22.18 or newer, but this is ${process.version}. Run "agent-network doctor" for the exact fix (it works on any Node).`);
+  }
+  if (command === 'doctor') {
+    const { runDoctor, formatDoctor } = await import('./node/doctor.ts');
+    const report = await runDoctor({ home, hub: values.hub });
+    print(values['as-json'] ? report : formatDoctor(report));
+    process.exitCode = report.ok ? 0 : 1;
+    return;
+  }
+  if (command === 'tools') {
+    const { describeTools } = await import('./tools.ts');
+    return print(describeTools());
+  }
 
   if (command === 'login' || command === 'logout' || command === 'whoami') {
     const { runAccountCommand } = await import('./node/account.ts');
@@ -208,6 +233,41 @@ async function main(): Promise<void> {
       }
       case 'orient':
         return print(session.orient());
+      case 'call': {
+        // The shell route to the same tools the MCP server offers (docs/ACCESS.md, mode B). Output is always one JSON object.
+        const { TOOLS, toolByName, parseToolArgs } = await import('./tools.ts');
+        const def = toolByName(sub ?? '');
+        if (!def) throw new Error(`usage: call <tool> [--json '{"key":"value"}' | --json-file FILE]\nTools: ${TOOLS.map((tool) => tool.name).join(', ')}   (details: agent-network tools)`);
+        let args: unknown = {};
+        try {
+          const { readFileSync } = await import('node:fs');
+          const text = values['json-file'] ? readFileSync(resolve(values['json-file']), 'utf8') : values.json;
+          if (text) args = JSON.parse(text);
+        } catch (error) {
+          throw new Error(`The arguments are not valid JSON (${error instanceof Error ? error.message : String(error)}). Put the JSON in single quotes, or write it to a file and use --json-file.`);
+        }
+        try {
+          const result = await def.run(session, parseToolArgs(def, args));
+          return print({ ok: true, result, notice: session.notice() });
+        } catch (error) {
+          const { NetworkError } = await import('./errors.ts');
+          process.exitCode = 1;
+          return print({ ok: false, error: error instanceof NetworkError ? `${error.code}: ${error.message}` : `ERROR: ${error instanceof Error ? error.message : String(error)}` });
+        }
+      }
+      case 'inbox': {
+        // Without --wait this is the get_inbox tool. With it, the command blocks until an enquiry or an answer needs you.
+        const waitSeconds = Math.min(Math.max(Number(values.wait ?? 0) || 0, 0), 600);
+        const started = Date.now();
+        await session.sync(true);
+        while (session.actionable() === 0 && Date.now() - started < waitSeconds * 1000) {
+          await new Promise((done) => setTimeout(done, 2000));
+          await session.sync(true);
+        }
+        const nothingNew = session.actionable() === 0;
+        const result = await session.inbox();
+        return print({ ok: true, waited_seconds: Math.round((Date.now() - started) / 1000), nothing_new: nothingNew, result, notice: session.notice() });
+      }
       case 'trace': {
         if (sub !== 'export') throw new Error('usage: trace export [--run ID] [--out FILE]');
         if (!node.settings.observer) throw new Error('This node is not an observer. Set "observer: true" in node.yaml (only for an admin the manifest lists under "observers").');
