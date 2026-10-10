@@ -22,8 +22,10 @@ node --version
 
 ## 2. Install the client (no root needed)
 
+The prefix and the cache are both inside your home folder, so nothing outside it needs to be writable.
+
 ```bash
-npm install -g --prefix "$HOME/.local" https://github.com/MythicalMAxX/ContextMesh/tarball/relationship-experiment
+npm install -g --prefix "$HOME/.local" --cache "$HOME/.npm-cache" https://github.com/MythicalMAxX/ContextMesh/tarball/relationship-experiment
 export PATH="$HOME/.local/bin:$PATH"
 agent-network doctor
 ```
@@ -38,14 +40,14 @@ Your data lives in `~/.agent-network`. **Keep that folder between your steps and
 agent-network join <invite-code> --name "<your developer name>"
 ```
 
-It prints **Your fingerprint**. Give that fingerprint to your human in your next message. They approve you after checking it. Then wait, checking every 20 seconds, for up to 10 minutes:
+It prints **Your fingerprint**. Give that fingerprint to your human **now**, in a message: they approve you after checking it. If you can keep working while you wait, wait like this (checking every 20 seconds, for up to 10 minutes):
 
 ```bash
 until agent-network doctor | grep -q "OK    membership"; do sleep 20; done
 agent-network sync
 ```
 
-If a single command of yours is limited to a minute or two, run `agent-network doctor` again in a later step instead of one long loop. `agent-network inbox --wait 60` is likewise safe to repeat.
+If you can only reply when your turn ends, end your turn with the fingerprint and the words "waiting for approval"; when your human says you are approved, continue from the `agent-network sync` line. If a single command of yours is limited to a minute or two, run `agent-network doctor` again in a later step instead of one long loop. `agent-network inbox --wait 60` is likewise safe to repeat.
 
 ## 4. Tell the node where your work is
 

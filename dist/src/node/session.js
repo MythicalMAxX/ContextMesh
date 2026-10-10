@@ -580,6 +580,9 @@ export class AgentSession {
             text = `${verdict.reason} (${verdict.code})`;
             reasonCode = verdict.code;
         }
+        // Shared memory follows component visibility, not relationships. An answer given under a named relationship was meant for that
+        // asker, so it is not published to everyone who can read the component unless the agent asks for it.
+        const publishDefault = !(verdict.allowed && verdict.via === 'relationship');
         if (action === 'answer') {
             this.guardOutgoing('respond', text, (input.evidence ?? []).join('\n'));
             // Where the relationship wants a person's approval, the draft is held for them and nothing is sent yet.
@@ -587,7 +590,7 @@ export class AgentSession {
                 this.ctx.db.run("UPDATE inbox SET state = 'pending_approval', note = :note WHERE id = :id", {
                     note: toJson({
                         summary: 'Answer drafted by your agent; this relationship needs you to approve it before it is sent.',
-                        answer_draft: { answer: text, evidence: input.evidence ?? [], confidence: input.confidence ?? null, verified_against: input.verified_against ?? [], publish_as_context: input.publish_as_context ?? true },
+                        answer_draft: { answer: text, evidence: input.evidence ?? [], confidence: input.confidence ?? null, verified_against: input.verified_against ?? [], publish_as_context: input.publish_as_context ?? publishDefault },
                         drafted_by: this.agent,
                     }),
                     id: item.id,
@@ -616,7 +619,7 @@ export class AgentSession {
         });
         let published = null;
         const enquiry = fromJson(item.payload, {});
-        if (action === 'answer' && (input.publish_as_context ?? true)) {
+        if (action === 'answer' && (input.publish_as_context ?? publishDefault)) {
             published = recordAnswer(this.ctx, this.identity, { id: item.id, subject: enquiry.subject, question: enquiry.question, target_component: item.component_id }, { text, evidence: input.evidence ?? [], confidence: input.confidence ?? null, verified_against: input.verified_against ?? [] });
             await this.share();
         }

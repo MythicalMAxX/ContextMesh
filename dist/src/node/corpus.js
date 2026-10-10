@@ -79,4 +79,21 @@ export function buildCorpus(options) {
         cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 3 }),
     };
 }
+/**
+ * Removes the path of the working folder from an answer. The model quotes the paths it saw, and a path such as
+ * C:\Users\alice\AppData\Local\Temp\cm-answer-x\src\a.ts tells the asker the owner's user name and folder layout. Each folder's path
+ * becomes ".", so "src/a.ts:4" stays a usable reference. Matches the native, forward-slash and escaped-backslash spellings,
+ * ignoring case (Windows).
+ */
+export function scrubPaths(text, dirs) {
+    let out = text;
+    for (const dir of dirs) {
+        if (dir.length < 6)
+            continue;
+        const spellings = new Set([dir, dir.replaceAll('\\', '/'), dir.replaceAll('\\', '\\\\')]);
+        for (const spelling of spellings)
+            out = out.replace(new RegExp(spelling.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '.');
+    }
+    return out;
+}
 //# sourceMappingURL=corpus.js.map

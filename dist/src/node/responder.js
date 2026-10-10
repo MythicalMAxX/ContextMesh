@@ -14,7 +14,7 @@ import { authorizeAsk } from '../relationships.js';
 import { activeProjects, insideRoots } from '../scope.js';
 import { describeHits, findSecrets } from '../secrets.js';
 import { fromJson, iso, truncate } from '../util.js';
-import { buildCorpus } from './corpus.js';
+import { buildCorpus, scrubPaths } from './corpus.js';
 import { buildCommand, runCommand } from './runtime.js';
 import { AgentSession } from './session.js';
 export function responderPrompt(enquiry, from, scoped = false) {
@@ -113,7 +113,8 @@ export async function tryAutoRespond(node, messageId, options = {}) {
         const enquiry = fromJson(item.payload, {});
         const started = Date.now();
         const { code, stdout } = await runCommand(command.built, responderPrompt(enquiry, item.sender, !!corpus), cwd, settings.timeout_seconds);
-        const answer = stdout.trim();
+        // The agent quotes the paths it saw; the folder it worked in must not reach the asker (it names the owner's user and layout).
+        const answer = scrubPaths(stdout.trim(), [cwd, repositoryDir]);
         // The start of the raw output is kept so an escalation can be explained afterwards (UNKNOWN, empty, or an answer that was refused).
         audit(node.ctx, null, 'agent.run', {
             request_id: item.id,
